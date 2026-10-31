@@ -1,6 +1,6 @@
 // 저장소: Firebase 설정이 있으면 Firestore 실시간 공유, 없으면 이 브라우저(localStorage)에만 저장
 
-export const COLLS = ['items', 'hotels', 'ideas', 'checklist', 'expenses', 'settings', 'snapshots', 'presence'];
+export const COLLS = ['items', 'hotels', 'ideas', 'checklist', 'expenses', 'settings', 'snapshots', 'presence', 'chat'];
 const FB_VER = '10.12.2';
 
 function emptyData() {

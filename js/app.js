@@ -39,7 +39,7 @@ const ui = {
   status: ['local', ''],
 };
 let store;
-let D = { items: {}, hotels: {}, ideas: {}, checklist: {}, expenses: {}, settings: {}, snapshots: {}, presence: {} };
+let D = { items: {}, hotels: {}, ideas: {}, checklist: {}, expenses: {}, settings: {}, snapshots: {}, presence: {}, chat: {} };
 const settings = () => D.settings.main || {};
 const placeById = (id) => PLACES.find((p) => p.id === id);
 // 일정/아이디어/숙소의 좌표: 직접 찍은 위치 > 장소DB 위치
@@ -1765,6 +1765,141 @@ function seed(force = false) {
   store.put('settings', { rate: 195, ...settings(), id: 'main', seeded: true });
 }
 
+// ---------- 채팅 ----------
+const chat = { open: false, lastRead: Number(localStorage.getItem('sh2027:chatRead') || 0), seen: null };
+const chatMsgs = () => Object.values(D.chat).sort((a, b) => a.at - b.at);
+const unreadCount = () => chatMsgs().filter((m) => m.at > chat.lastRead && m.by !== ui.me).length;
+
+function linkify(text) {
+  return esc(text).replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+}
+
+function initChat() {
+  const fab = document.createElement('button');
+  fab.id = 'chat-fab';
+  fab.title = '채팅';
+  fab.innerHTML = '💬<b class="badge" hidden></b>';
+  const panel = document.createElement('aside');
+  panel.id = 'chat';
+  panel.hidden = true;
+  panel.innerHTML = `
+    <div class="chat-head"><b>💬 우리끼리 채팅</b><span class="chat-who"></span><button class="x-btn" id="chat-close">✕</button></div>
+    <div class="chat-list" id="chat-list"></div>
+    <form class="chat-form" id="chat-form" autocomplete="off">
+      <textarea id="chat-in" rows="1" placeholder="메시지 (Enter 전송 · Shift+Enter 줄바꿈)"></textarea>
+      <button class="btn primary">전송</button>
+    </form>`;
+  document.body.append(fab, panel);
+  fab.onclick = () => toggleChat(!chat.open);
+  $('#chat-close', panel).onclick = () => toggleChat(false);
+  const input = $('#chat-in', panel);
+  const grow = () => {
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
+  };
+  input.addEventListener('input', grow);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      $('#chat-form', panel).requestSubmit();
+    }
+  });
+  $('#chat-form', panel).onsubmit = (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    if (!ui.me) return askWho();
+    const at = Date.now();
+    put('chat', { id: `${at.toString(36)}-${uid()}`, by: ui.me, text: text.slice(0, 2000), at });
+    input.value = '';
+    grow();
+    input.focus();
+  };
+  $('#chat-list', panel).addEventListener('click', (e) => {
+    const b = e.target.closest('[data-chatdel]');
+    if (b && confirm('이 메시지를 삭제할까요?')) store.del('chat', b.dataset.chatdel);
+    const y = e.target.closest('[data-yt]');
+    if (y) openYT(y.dataset.yt);
+  });
+  document.addEventListener('visibilitychange', () => chat.open && !document.hidden && markChatRead());
+}
+
+function toggleChat(open) {
+  chat.open = open;
+  $('#chat').hidden = !open;
+  document.body.classList.toggle('chat-open', open);
+  renderChat(true);
+  if (open) setTimeout(() => $('#chat-in').focus(), 30);
+}
+
+function markChatRead() {
+  const last = chatMsgs().at(-1)?.at || 0;
+  if (last > chat.lastRead) {
+    chat.lastRead = last;
+    localStorage.setItem('sh2027:chatRead', String(last));
+  }
+}
+
+// 다른 사람이 보낸 새 메시지 → 채팅이 닫혀 있으면 알림
+function notifyChat() {
+  const msgs = chatMsgs();
+  if (!chat.seen) {
+    chat.seen = new Set(msgs.map((m) => m.id));
+    return;
+  }
+  for (const m of msgs) {
+    if (chat.seen.has(m.id)) continue;
+    chat.seen.add(m.id);
+    if (m.by === ui.me || (chat.open && !document.hidden)) continue;
+    toast(`💬 ${PEOPLE[m.by]?.name || '누군가'}: ${m.text.slice(0, 40)}${m.text.length > 40 ? '…' : ''}`, { label: '열기', fn: () => toggleChat(true) });
+  }
+}
+
+function renderChat(forceBottom = false) {
+  if (!$('#chat-fab')) return;
+  if (chat.open && !document.hidden) markChatRead();
+  const n = unreadCount();
+  const badge = $('#chat-fab .badge');
+  badge.hidden = !n;
+  badge.textContent = n > 99 ? '99+' : n;
+  document.title = `${n ? `(${n}) ` : ''}상하이 여행 2027`;
+  if (!chat.open) return;
+
+  $('#chat .chat-who').innerHTML = TRIP.people
+    .map((p) => `<span class="cw ${lastSeen(p.id).on ? 'on' : ''}" title="${lastSeen(p.id).title}">${avatar(p.id, 'xs')}</span>`)
+    .join('');
+  const list = $('#chat-list');
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 60;
+  const msgs = chatMsgs();
+  let lastDay = '';
+  let lastBy = '';
+  let lastAt = 0;
+  list.innerHTML = msgs.length
+    ? msgs
+        .map((m) => {
+          const d = new Date(m.at);
+          const day = d.toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' });
+          const sep = day !== lastDay ? `<div class="chat-day">${day}</div>` : '';
+          const cont = !sep && lastBy === m.by && m.at - lastAt < 5 * 60000;
+          lastDay = day;
+          lastBy = m.by;
+          lastAt = m.at;
+          const mine = m.by === ui.me;
+          const p = PEOPLE[m.by];
+          const yt = (m.text.match(/https?:\/\/[^\s]+/g) || []).map(youtubeId).find(Boolean);
+          return `${sep}<div class="msg ${mine ? 'mine' : ''} ${cont ? 'cont' : ''}" style="--c:${p?.color || '#64748b'}">
+            ${!mine && !cont ? `<div class="msg-name">${avatar(m.by, 'xs')} ${p?.name || '?'}</div>` : ''}
+            <div class="msg-row">
+              <div class="bubble">${linkify(m.text)}${yt ? `<button class="msg-yt" data-yt="${yt}"><img src="https://i.ytimg.com/vi/${yt}/mqdefault.jpg" alt=""><span>▶</span></button>` : ''}</div>
+              <small class="msg-time">${d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}${mine ? ` <button class="msg-del" data-chatdel="${m.id}" title="삭제">✕</button>` : ''}</small>
+            </div>
+          </div>`;
+        })
+        .join('')
+    : '<p class="empty">첫 메시지를 남겨보세요 👋<br><small>유튜브 링크를 보내면 바로 재생돼요</small></p>';
+  if (forceBottom || atBottom) list.scrollTop = list.scrollHeight;
+}
+
 // ---------- 렌더 ----------
 function render() {
   if (ui.dragging) return;
@@ -1776,6 +1911,7 @@ function render() {
   ({ plan: renderPlan, map: renderMap, ideas: renderIdeas, hotel: renderHotel, money: renderMoney, prep: renderPrep, more: renderMore }[ui.tab] || renderPlan)(el);
   if (gridScroll != null && $('.grid-wrap')) $('.grid-wrap').scrollTop = gridScroll;
   window.scrollTo(0, y);
+  renderChat();
 }
 
 function askWho() {
@@ -1806,8 +1942,11 @@ async function main() {
       if ($('#hdr').innerHTML) renderHeader();
     },
   });
+  initChat();
   store.subscribe((data) => {
     D = data;
+    notifyChat();
+    renderChat();
     clearTimeout(rerenderTimer);
     rerenderTimer = setTimeout(() => {
       // 모달이 열려있는 동안에도 배경은 갱신 (모달 입력값은 유지됨)

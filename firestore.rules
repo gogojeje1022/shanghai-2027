@@ -4,7 +4,7 @@ service cloud.firestore {
     // 링크의 #t=비밀키 를 아는 사람만 읽고 쓸 수 있음 (목록 조회는 막음)
     match /trips/{tripId}/{coll}/{docId} {
       allow get, list, create, update, delete: if tripId.size() >= 16
-        && coll in ['items', 'hotels', 'ideas', 'checklist', 'expenses', 'settings', 'snapshots', 'presence'];
+        && coll in ['items', 'hotels', 'ideas', 'checklist', 'expenses', 'settings', 'snapshots', 'presence', 'chat'];
     }
   }
 }
