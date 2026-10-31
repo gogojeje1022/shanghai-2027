@@ -1,0 +1,11 @@
+{
+  "name": "상하이 여행 2027",
+  "short_name": "상하이 2027",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f8f6f3",
+  "theme_color": "#dc2626",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
