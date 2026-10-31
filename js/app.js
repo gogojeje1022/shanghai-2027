@@ -39,7 +39,7 @@ const ui = {
   status: ['local', ''],
 };
 let store;
-let D = { items: {}, hotels: {}, ideas: {}, checklist: {}, expenses: {}, settings: {} };
+let D = { items: {}, hotels: {}, ideas: {}, checklist: {}, expenses: {}, settings: {}, snapshots: {}, presence: {} };
 const settings = () => D.settings.main || {};
 const placeById = (id) => PLACES.find((p) => p.id === id);
 // 일정/아이디어/숙소의 좌표: 직접 찍은 위치 > 장소DB 위치
@@ -76,7 +76,7 @@ function toast(msg, action) {
     t.append(b);
   }
   $('#toasts').append(t);
-  setTimeout(() => t.remove(), action ? 6000 : 2500);
+  setTimeout(() => t.remove(), action ? action.ms || 6000 : 2500);
 }
 
 function stamp(obj) {
@@ -89,6 +89,19 @@ function removeWithUndo(coll, id, label) {
   const prev = D[coll][id];
   store.del(coll, id);
   toast(`${label} 삭제됨`, { label: '되돌리기', fn: () => store.put(coll, prev) });
+}
+// 일정 전체를 next 로 바꾼다 (바뀐 것만 한 번에 저장) + 되돌리기
+function itemOps(cur, next) {
+  const ops = [];
+  for (const id of Object.keys(cur)) if (!next[id]) ops.push({ coll: 'items', id });
+  for (const [id, obj] of Object.entries(next))
+    if (!cur[id] || JSON.stringify(cur[id]) !== JSON.stringify(obj)) ops.push({ coll: 'items', id, obj });
+  return ops;
+}
+function replaceItems(next, msg) {
+  const prev = { ...D.items };
+  store.batch(itemOps(prev, next));
+  toast(msg, { label: '되돌리기', ms: 10000, fn: () => (store.batch(itemOps(D.items, prev)), toast('되돌렸어요')) });
 }
 
 function avatar(pid, size = '') {
@@ -141,16 +154,39 @@ function renderHeader() {
     <div class="hdr-r">
       <span class="sync ${st}" title="${esc(msg)}"><i></i>${st === 'live' ? '공유 중' : st === 'offline' ? '오프라인' : st === 'error' ? '오류' : '로컬'}</span>
       <div class="me-pick" title="나는 누구?">
-        ${TRIP.people.map((p) => `<button class="av-btn ${ui.me === p.id ? 'on' : ''}" data-me="${p.id}" style="--c:${p.color}">${p.name}</button>`).join('')}
+        ${TRIP.people.map((p) => {
+          const seen = lastSeen(p.id);
+          return `<button class="av-btn ${ui.me === p.id ? 'on' : ''}" data-me="${p.id}" style="--c:${p.color}" title="${seen.title}">${p.name}<small class="seen ${seen.on ? 'on' : ''}">${seen.label}</small></button>`;
+        }).join('')}
       </div>
     </div>`;
   $$('[data-me]').forEach((b) =>
     (b.onclick = () => {
       ui.me = b.dataset.me;
       localStorage.setItem('sh2027:me', ui.me);
+      heartbeat();
       render();
     }),
   );
+}
+
+// ---------- 마지막 접속 ----------
+function lastSeen(pid) {
+  const at = D.presence[pid]?.at;
+  if (!at) return { label: '접속 기록 없음', title: '아직 접속한 적 없음', on: false };
+  const min = Math.floor((Date.now() - at) / 60000);
+  const title = `마지막 접속: ${new Date(at).toLocaleString('ko-KR')}`;
+  if (min < 3) return { label: '● 접속 중', title, on: true };
+  if (min < 60) return { label: `${min}분 전`, title };
+  if (min < 24 * 60) return { label: `${Math.floor(min / 60)}시간 전`, title };
+  if (min < 7 * 24 * 60) return { label: `${Math.floor(min / 1440)}일 전`, title };
+  return { label: new Date(at).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' }), title };
+}
+function heartbeat() {
+  if (!ui.me || document.hidden) return;
+  const prev = D.presence[ui.me]?.at || 0;
+  if (Date.now() - prev < 60000) return; // 1분에 한 번만 기록
+  store.put('presence', { id: ui.me, at: Date.now() });
 }
 
 function renderTabs() {
@@ -218,7 +254,7 @@ function blockHTML(it, lay, list) {
   const w = 100 / lay.lanes;
   const yt = (it.links || []).some((l) => youtubeId(l.url));
   const short = it.end - it.start <= 35;
-  return `<div class="block ${short ? 'short' : ''} ${it.locked ? 'locked' : ''}" data-id="${it.id}"
+  return `<div class="block ${short ? 'short' : ''} ${it.locked ? 'locked' : ''} ${ui.sel?.has(it.id) ? 'sel' : ''}" data-id="${it.id}"
       style="top:${top}px;height:${h}px;left:calc(${w * lay.lane}% + 2px);width:calc(${w}% - 4px);--c:${c.color}">
       <div class="grip" title="끌어서 이동">⋮⋮</div>
       <div class="b-title">${warn}${c.icon} ${esc(it.title)}${yt ? ' <span class="yt-dot">▶</span>' : ''}</div>
@@ -241,6 +277,9 @@ function renderPlan(el) {
     <div class="toolbar">
       <button class="btn primary" id="btn-reco">✨ 추천 일정 만들기</button>
       <button class="btn" id="btn-add">＋ 일정 추가</button>
+      <button class="btn" id="btn-snap">💾 저장함 <small class="muted">${Object.keys(D.snapshots).length}/${SNAP_MAX}</small></button>
+      <button class="btn" id="btn-clear">🧹 비우기</button>
+      <button class="btn ${ui.sel ? 'on' : ''}" id="btn-sel">☑️ 골라서 삭제</button>
       <div class="seg" id="filter">
         <button data-f="all" class="${ui.filter === 'all' ? 'on' : ''}">모두</button>
         ${TRIP.people.map((p) => `<button data-f="${p.id}" class="${ui.filter === p.id ? 'on' : ''}" style="--c:${p.color}">${p.name}</button>`).join('')}
@@ -250,6 +289,13 @@ function renderPlan(el) {
         <button data-v="list" class="${ui.view === 'list' ? 'on' : ''}">목록</button>
       </div>
     </div>
+    ${ui.sel ? `<div class="sel-bar">
+      <b>${ui.sel.size}개 선택</b><span class="muted small">일정을 눌러서 고르세요</span><span class="sp"></span>
+      <button class="chip" id="sel-all">${showDays.length === 1 ? '이 날' : '보이는 것'} 모두</button>
+      <button class="chip" id="sel-none">선택 해제</button>
+      <button class="btn danger" id="sel-del" ${ui.sel.size ? '' : 'disabled'}>🗑 ${ui.sel.size}개 삭제</button>
+      <button class="btn" id="sel-done">완료</button>
+    </div>` : ''}
     <div class="day-chips ${mobile && ui.view === 'grid' ? '' : 'hide'}">
       ${days.map((d, i) => `<button data-md="${i}" class="${i === ui.mDay ? 'on' : ''}">Day${i + 1}<small>${dayLabel(d)}</small></button>`).join('')}
     </div>`;
@@ -290,6 +336,22 @@ function renderPlan(el) {
   }
 
   $('#btn-reco', el).onclick = openRecommend;
+  $('#btn-snap', el).onclick = openSnapshots;
+  $('#btn-clear', el).onclick = openClear;
+  $('#btn-sel', el).onclick = () => ((ui.sel = ui.sel ? null : new Set()), render());
+  if (ui.sel) {
+    const shown = showDays.flatMap((d) => visibleItems(d).map((i) => i.id));
+    $('#sel-all', el).onclick = () => (shown.forEach((id) => ui.sel.add(id)), render());
+    $('#sel-none', el).onclick = () => (ui.sel.clear(), render());
+    $('#sel-done', el).onclick = () => ((ui.sel = null), render());
+    $('#sel-del', el).onclick = () => {
+      const n = ui.sel.size;
+      const next = { ...D.items };
+      ui.sel.forEach((id) => delete next[id]);
+      ui.sel = null;
+      replaceItems(next, `${n}개 일정 삭제됨`);
+    };
+  }
   $('#btn-add', el).onclick = () => openItem({ day: showDays[0], start: 10 * 60, end: 11 * 60 });
   $$('[data-f]', el).forEach((b) => (b.onclick = () => ((ui.filter = b.dataset.f), render())));
   $$('[data-v]', el).forEach(
@@ -298,10 +360,140 @@ function renderPlan(el) {
   $$('[data-md]', el).forEach((b) => (b.onclick = () => ((ui.mDay = +b.dataset.md), render())));
   $$('[data-open]', el).forEach((b) => (b.onclick = (e) => {
     if (e.target.closest('a,button')) return;
+    if (ui.sel) return toggleSel(b.dataset.open);
     openItem(D.items[b.dataset.open]);
   }));
   $$('[data-showmap]', el).forEach((b) => (b.onclick = () => showOnMap(D.items[b.dataset.showmap])));
   bindYT(el);
+}
+
+function toggleSel(id) {
+  if (ui.sel.has(id)) ui.sel.delete(id);
+  else ui.sel.add(id);
+  render();
+}
+
+// ----- 일정 저장함 (최대 10개, 셋이 공유) -----
+const SNAP_MAX = 10;
+const keepItem = (i) => i.locked || /^h(in|out)-/.test(i.id);
+const shortDate = (t) => new Date(t).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+function openSnapshots() {
+  const snaps = Object.values(D.snapshots).sort((a, b) => b.createdAt - a.createdAt);
+  const full = snaps.length >= SNAP_MAX;
+  const cur = Object.values(D.items);
+  const m = openModal(`
+    <div class="m-head"><h2>💾 일정 저장함 <small class="muted">${snaps.length}/${SNAP_MAX}</small></h2><button class="x-btn" data-close>✕</button></div>
+    <p class="muted">지금 시간표를 통째로 저장해두고 언제든 다시 불러올 수 있어요. 셋이 같이 보는 저장함이에요.</p>
+    <form class="row-form" id="snap-form">
+      <input name="name" maxlength="40" placeholder="이름 (예: 디즈니 버전, 쇼핑 위주)">
+      <button class="btn primary" ${full ? 'disabled' : ''}>현재 일정 저장 (${cur.length}개)</button>
+    </form>
+    ${full ? '<p class="warn small">10개가 꽉 찼어요. 안 쓰는 걸 삭제하거나 “덮어쓰기”를 써주세요.</p>' : ''}
+    <div class="snap-list">
+      ${snaps.length ? '' : '<p class="empty">아직 저장한 일정이 없어요</p>'}
+      ${snaps
+        .map((sn) => `<div class="snap">
+          <div class="snap-main">
+            <b>${esc(sn.name)}</b>
+            <small>${shortDate(sn.createdAt)} · ${PEOPLE[sn.by]?.name || '누군가'} · ${sn.items.length}개 (날짜별 ${TRIP.days.map((d) => sn.items.filter((i) => i.day === d).length).join('·')})</small>
+          </div>
+          <div class="snap-act">
+            <button class="btn primary" data-sload="${sn.id}">불러오기</button>
+            <button class="chip" data-sover="${sn.id}">덮어쓰기</button>
+            <button class="chip" data-sren="${sn.id}">이름</button>
+            <button class="chip danger" data-sdel="${sn.id}">삭제</button>
+          </div>
+          <details class="snap-more"><summary>내용 보기</summary>${TRIP.days
+            .map((d, i) => {
+              const l = sn.items.filter((x) => x.day === d).sort((a, b) => a.start - b.start);
+              return `<div class="snap-day"><b>Day${i + 1}</b> ${l.length ? l.map((x) => `${fmt(x.start)} ${esc(x.title)}`).join(' · ') : '<span class="muted">비어 있음</span>'}</div>`;
+            })
+            .join('')}</details>
+        </div>`)
+        .join('')}
+    </div>`, { wide: true });
+  $$('[data-close]', m).forEach((b) => (b.onclick = closeModal));
+  const snapItems = () => Object.values(D.items).map((i) => ({ ...i }));
+  $('#snap-form', m).onsubmit = (e) => {
+    e.preventDefault();
+    if (Object.keys(D.snapshots).length >= SNAP_MAX) return toast('10개가 꽉 찼어요');
+    const name = e.target.name.value.trim() || `${PEOPLE[ui.me]?.name || ''} 저장 ${shortDate(Date.now())}`.trim();
+    put('snapshots', { id: uid(), name, items: snapItems(), createdAt: Date.now(), by: ui.me });
+    toast(`“${name}” 저장했어요`);
+    openSnapshots();
+  };
+  $$('[data-sload]', m).forEach((b) => (b.onclick = () => {
+    const sn = D.snapshots[b.dataset.sload];
+    if (!confirm(`“${sn.name}”(${sn.items.length}개)으로 시간표를 바꿀까요?\n지금 일정은 이 버전으로 바뀌어요. (10초 안에 되돌리기 가능)`)) return;
+    closeModal();
+    replaceItems(Object.fromEntries(sn.items.map((i) => [i.id, i])), `“${sn.name}” 불러왔어요`);
+  }));
+  $$('[data-sover]', m).forEach((b) => (b.onclick = () => {
+    const sn = D.snapshots[b.dataset.sover];
+    if (!confirm(`“${sn.name}”을 지금 일정(${Object.keys(D.items).length}개)으로 덮어쓸까요?`)) return;
+    put('snapshots', { ...sn, items: snapItems(), createdAt: Date.now(), by: ui.me });
+    toast('덮어썼어요');
+    openSnapshots();
+  }));
+  $$('[data-sren]', m).forEach((b) => (b.onclick = () => {
+    const sn = D.snapshots[b.dataset.sren];
+    const name = prompt('새 이름', sn.name)?.trim();
+    if (!name) return;
+    put('snapshots', { ...sn, name });
+    openSnapshots();
+  }));
+  $$('[data-sdel]', m).forEach((b) => (b.onclick = () => {
+    const sn = D.snapshots[b.dataset.sdel];
+    if (!confirm(`저장본 “${sn.name}”을 삭제할까요?`)) return;
+    removeWithUndo('snapshots', sn.id, `“${sn.name}”`);
+    openSnapshots();
+  }));
+}
+
+// ----- 일정 비우기 -----
+function openClear() {
+  const all = Object.values(D.items);
+  const canSave = Object.keys(D.snapshots).length < SNAP_MAX;
+  const m = openModal(`
+    <div class="m-head"><h2>🧹 일정 비우기</h2><button class="x-btn" data-close>✕</button></div>
+    <form class="form" id="clear-form">
+      <div class="full"><b>무엇을 비울까요?</b>
+        <div class="chips-pick">
+          <label><input type="radio" name="scope" value="all" checked><span>전체 4일</span></label>
+          ${TRIP.days.map((d, i) => `<label><input type="radio" name="scope" value="${d}"><span>Day${i + 1} ${dayLabel(d)}</span></label>`).join('')}
+          <label><input type="radio" name="scope" value="auto"><span>✨ 추천으로 넣은 것만</span></label>
+        </div>
+      </div>
+      <label class="full inline"><input type="checkbox" name="keep" checked> ✈️ 항공·공항·숙소 체크인/아웃 일정은 남기기</label>
+      <label class="full inline"><input type="checkbox" name="save" ${canSave ? 'checked' : 'disabled'}> 💾 비우기 전에 지금 일정을 저장함에 저장 ${canSave ? '' : '<small class="muted">(저장함이 꽉 찼어요)</small>'}</label>
+      <p class="full warn" id="clear-count"></p>
+      <div class="full m-actions"><span class="sp"></span><button type="button" class="btn" data-close>취소</button><button class="btn danger" id="clear-go">🧹 비우기</button></div>
+    </form>`);
+  $$('[data-close]', m).forEach((b) => (b.onclick = closeModal));
+  const f = $('#clear-form', m);
+  const targets = () => {
+    const sc = f.scope.value;
+    return all.filter((i) => (sc === 'all' || (sc === 'auto' ? i.auto : i.day === sc)) && !(f.keep.checked && keepItem(i)));
+  };
+  const upd = () => {
+    const n = targets().length;
+    $('#clear-count', m).textContent = n ? `${n}개 일정이 지워져요 (지운 뒤 10초 안에 되돌리기 가능)` : '지울 일정이 없어요';
+    $('#clear-go', m).disabled = !n;
+  };
+  f.onchange = upd;
+  upd();
+  f.onsubmit = (e) => {
+    e.preventDefault();
+    const del = targets();
+    if (!del.length) return;
+    if (f.save.checked && !f.save.disabled)
+      put('snapshots', { id: uid(), name: `비우기 전 자동저장 ${shortDate(Date.now())}`, items: all.map((i) => ({ ...i })), createdAt: Date.now(), by: ui.me });
+    const next = { ...D.items };
+    del.forEach((i) => delete next[i.id]);
+    closeModal();
+    replaceItems(next, `${del.length}개 일정을 비웠어요`);
+  };
 }
 
 function showOnMap(it) {
@@ -328,6 +520,11 @@ function renderMap(el) {
   const layerKey = localStorage.getItem('sh2027:layer') || 'amap';
   el.innerHTML = `
     <div class="map-bar">
+      <form class="map-search" id="msearch">
+        <input id="msq" placeholder="🔍 장소 검색 – 中文 · English · 한국어 (예: 豫园, Yu Garden, 와이탄)" value="${esc(ui.mapSearch?.q || '')}" autocomplete="off">
+        <button class="btn primary">검색</button>
+        ${ui.mapSearch ? '<button type="button" class="btn" id="msclear">✕</button>' : ''}
+      </form>
       <div class="seg wrap" id="mday">
         <button data-mday="-1" class="${mapDay === -1 ? 'on' : ''}">전체</button>
         ${TRIP.days.map((d, i) => `<button data-mday="${i}" class="${mapDay === i ? 'on' : ''}" style="--c:${DAY_COLORS[i]}"><i class="dot" style="background:${DAY_COLORS[i]}"></i>Day${i + 1} ${dayLabel(d)}</button>`).join('')}
@@ -387,6 +584,36 @@ function renderMap(el) {
     else MV.map.fitBounds([MV.map._toView([30.2, 120.1]), MV.map._toView([31.4, 121.75])]);
   }));
   $('#pinedit', el).onclick = () => ((ui.pinEdit = !ui.pinEdit), render());
+  $('#msearch', el).onsubmit = (e) => {
+    e.preventDefault();
+    runMapSearch($('#msq', el).value.trim());
+  };
+  $('#msclear', el)?.addEventListener('click', () => ((ui.mapSearch = null), render()));
+}
+
+// 지도 검색: 앱 장소DB + 고덕(키 있으면) / OSM
+async function runMapSearch(q) {
+  if (!q) return;
+  const ql = q.toLowerCase();
+  const local = PLACES.filter((p) => p.loc && [p.name, p.cn, p.id].some((t) => t?.toLowerCase().includes(ql))).map((p) => ({
+    name: p.name, cn: p.cn, en: '', addr: AREAS[p.area] || '', loc: p.loc, src: '앱 추천장소', placeId: p.id,
+  }));
+  ui.mapSearch = { q, results: local, loading: true };
+  render();
+  let remote = [];
+  let failed = false;
+  try {
+    remote = await searchPlace(q, { amapKey: settings().amapKey });
+  } catch {
+    failed = true;
+  }
+  if (ui.mapSearch?.q !== q) return;
+  ui.mapSearch = { q, results: [...local, ...remote], failed };
+  MV.pendingFit = null;
+  const pts = ui.mapSearch.results.map((r) => MV.map._toView(r.loc));
+  if (pts.length === 1) MV.map.setView(pts[0], 16);
+  else if (pts.length) MV.map.fitBounds(pts, { padding: [40, 40], maxZoom: 16 });
+  render();
 }
 
 function drawMapLayers(el, mapDay, show) {
@@ -473,6 +700,27 @@ function drawMapLayers(el, mapDay, show) {
     });
   }
 
+  const ms = ui.mapSearch;
+  if (ms) {
+    const amapKw = mapLinks(ms.q).amap;
+    const rows = ms.results.map((r, i) => {
+      const mk = L.marker(V(r.loc), { icon: pinIcon({ color: '#0ea5e9', text: String.fromCharCode(65 + (i % 26)), size: 30 }), zIndexOffset: 1200 }).addTo(MV.layers);
+      const names = [r.cn, r.en].filter((t) => t && t !== r.name);
+      mk.bindPopup(`<div class="pop"><b>🔍 ${esc(r.name)}</b>${names.length ? `<div class="pop-cn">${esc(names.join(' · '))}</div>` : ''}
+        ${r.addr ? `<div class="small">${esc(r.addr)}</div>` : ''}
+        <div class="pop-act"><button data-sr-plan="${i}">🗓️ 일정에 넣기</button><button data-sr-idea="${i}">💡 찜</button><button data-sr-taxi="${i}">🚕 택시카드</button>
+        <a href="${amapMarker(r.loc, r.name)}" target="_blank" rel="noopener">고덕에서 보기</a></div></div>`);
+      MV.markers[`sr${i}`] = mk;
+      return `<div class="ms-row" data-focus="sr${i}"><span class="num" style="background:#0ea5e9">${String.fromCharCode(65 + (i % 26))}</span><div><b>${esc(r.name)}</b><small>${esc([...names, r.addr].filter(Boolean).join(' · '))} <i class="src">${r.src}</i></small></div></div>`;
+    });
+    side.unshift(`<div class="ms-search"><h4>🔍 “${esc(ms.q)}” ${ms.loading ? '<small class="muted">검색 중…</small>' : `<small class="muted">${ms.results.length}개</small>`}</h4>
+      ${rows.join('')}
+      ${!ms.loading && !ms.results.length ? `<p class="muted small">${ms.failed ? '검색 서버에 연결하지 못했어요.' : '결과가 없어요. 중국어 이름으로도 검색해보세요.'}</p>` : ''}
+      <a class="chip" href="${amapKw}" target="_blank" rel="noopener">고덕지도 앱/웹에서 “${esc(ms.q)}” 검색 ↗</a>
+      ${settings().amapKey ? '' : '<p class="muted small">고덕 Web API 키를 ⚙️ 설정에 넣으면 고덕 POI로 바로 검색돼요.</p>'}
+    </div>`);
+  }
+
   $('#map-side', el).innerHTML = side.join('') + '<p class="muted small">번호 = 그날 순서 · 점선 = 이동 동선 · 이동시간은 직선거리 기준 대략치</p>';
   $$('[data-focus]', el).forEach((r) => (r.onclick = () => focusMarker(r.dataset.focus)));
   $$('#map-side [data-open]', el).forEach((r) => (r.onclick = () => openItem(D.items[r.dataset.open])));
@@ -498,7 +746,20 @@ function focusMarker(id) {
 function onMapPopupClick(e) {
   const b = e.target.closest('button');
   if (!b) return;
-  if (b.dataset.open) openItem(D.items[b.dataset.open]);
+  const sr = (k) => ui.mapSearch?.results[+b.dataset[k]];
+  if (b.dataset.srPlan) {
+    const r = sr('srPlan');
+    const p = r.placeId && placeById(r.placeId);
+    if (p) return planFromPlace(p);
+    openItem({ title: r.name, cn: r.cn || r.name, loc: r.loc, cat: 'sight', day: TRIP.days[ui.mapDay > 0 ? ui.mapDay : 1], start: 14 * 60, end: 15 * 60, memo: [r.en, r.addr].filter(Boolean).join('\n') });
+  } else if (b.dataset.srIdea) {
+    const r = sr('srIdea');
+    put('ideas', { id: uid(), title: r.name, cn: r.cn || r.name, loc: r.loc, placeId: r.placeId || null, memo: [r.en, r.addr].filter(Boolean).join('\n'), cat: 'sight', links: [], votes: ui.me ? { [ui.me]: true } : {}, by: ui.me });
+    toast(`${r.name} 찜!`);
+  } else if (b.dataset.srTaxi) {
+    const r = sr('srTaxi');
+    openTaxi(r.cn || r.name, r.addr);
+  } else if (b.dataset.open) openItem(D.items[b.dataset.open]);
   else if (b.dataset.placeToPlan) planFromPlace(placeById(b.dataset.placeToPlan));
   else if (b.dataset.placeToIdea) {
     const p = placeById(b.dataset.placeToIdea);
@@ -515,7 +776,7 @@ function locPicker(box, initial, getQuery, onChange) {
   const L = window.L;
   let loc = initial;
   box.innerHTML = `
-    <div class="lp-search"><input class="lp-q" placeholder="장소 검색 (중국어/영어가 잘 찾아져요)"><button type="button" class="btn lp-go">검색</button>${loc ? '<button type="button" class="btn lp-clear">위치 지우기</button>' : ''}</div>
+    <div class="lp-search"><input class="lp-q" placeholder="장소 검색 – 中文 · English"><button type="button" class="btn lp-go">검색</button>${loc ? '<button type="button" class="btn lp-clear">위치 지우기</button>' : ''}</div>
     <div class="lp-results"></div>
     <div class="lp-map"></div>
     <div class="small muted lp-txt"></div>`;
@@ -553,10 +814,10 @@ function locPicker(box, initial, getQuery, onChange) {
     const res = $('.lp-results', box);
     res.innerHTML = '<span class="muted small">검색 중…</span>';
     try {
-      const r = await searchPlace(query);
+      const r = await searchPlace(query, { amapKey: settings().amapKey });
       res.innerHTML = r.length
-        ? r.map((x, i) => `<button type="button" class="chip" data-r="${i}">${esc(x.name.split(',').slice(0, 3).join(','))}</button>`).join('')
-        : '<span class="muted small">결과 없음 – 지도를 직접 눌러 찍어주세요</span>';
+        ? r.map((x, i) => `<button type="button" class="chip" data-r="${i}"><b>${esc(x.name)}</b>${x.en && x.en !== x.name ? ` ${esc(x.en)}` : ''}${x.addr ? ` <small class="muted">${esc(x.addr)}</small>` : ''}</button>`).join('')
+        : '<span class="muted small">결과 없음 – 중국어 이름으로 검색하거나 지도를 직접 눌러 찍어주세요</span>';
       $$('[data-r]', res).forEach((b) => (b.onclick = () => setLoc(r[+b.dataset.r].loc)));
     } catch {
       res.innerHTML = '<span class="muted small">검색 실패 – 지도를 직접 눌러 찍어주세요</span>';
@@ -603,7 +864,7 @@ function renderList(days) {
               ? `<div class="gap">${legTxt}${free >= 30 ? `<span>⏳ 여유 ${durLabel(free)}</span>` : ''}</div>`
               : '';
             const isNow = now.date === d && now.min >= it.start && now.min < it.end;
-            return `${gap}<article class="card item-card ${isNow ? 'is-now' : ''}" data-open="${it.id}" style="--c:${c.color}">
+            return `${gap}<article class="card item-card ${isNow ? 'is-now' : ''} ${ui.sel?.has(it.id) ? 'sel' : ''}" data-open="${it.id}" style="--c:${c.color}">
               <div class="ic-time">${fmt(it.start)}<small>${fmt(it.end)}</small></div>
               <div class="ic-body">
                 <div class="ic-title">${c.icon} ${esc(it.title)} ${whoDots(it.who)}</div>
@@ -696,7 +957,7 @@ function bindGrid(el) {
 
   $$('.day-col', el).forEach((col) => {
     col.addEventListener('click', (e) => {
-      if (e.target !== col || suppressClick) return;
+      if (e.target !== col || suppressClick || ui.sel) return;
       const y = e.offsetY;
       const start = clamp(snap(TRIP.dayStart + y / ppm, 30), TRIP.dayStart, TRIP.dayEnd - 30);
       openItem({ day: col.dataset.day, start, end: Math.min(start + 60, TRIP.dayEnd) });
@@ -707,10 +968,11 @@ function bindGrid(el) {
     b.addEventListener('click', (e) => {
       if (suppressClick) return;
       if (e.target.closest('.resize')) return;
+      if (ui.sel) return toggleSel(b.dataset.id);
       openItem(D.items[b.dataset.id]);
     });
     b.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0) return;
+      if (e.button !== 0 || ui.sel) return;
       const onHandle = e.target.closest('.grip,.resize');
       if (e.pointerType !== 'mouse' && !onHandle) return; // 터치는 손잡이로만 (스크롤 유지)
       const it = D.items[b.dataset.id];
@@ -1421,6 +1683,11 @@ function renderMore(el) {
       <div class="row-form"><input id="title" value="${esc(settings().title || TRIP.title)}"><button class="btn" id="title-save">저장</button></div>
     </div>
     <div class="card">
+      <h3>🗺️ 고덕지도 검색 키 <small class="muted">(선택)</small></h3>
+      <p class="muted small">비워둬도 지도 검색은 OpenStreetMap으로 돼요. 고덕 개방플랫폼(lbs.amap.com)의 <b>Web服务</b> 키를 넣으면 고덕 POI로 더 정확하게 검색돼요. 셋이 같이 써요.</p>
+      <div class="row-form"><input id="amapkey" value="${esc(settings().amapKey || '')}" placeholder="고덕 Web服务 Key"><button class="btn" id="amapkey-save">저장</button></div>
+    </div>
+    <div class="card">
       <h3>💾 백업</h3>
       <div class="row-form">
         <button class="btn" id="export">JSON 내보내기</button>
@@ -1437,6 +1704,7 @@ function renderMore(el) {
     await navigator.clipboard.writeText(link);
     toast('링크 복사됨! 카톡으로 보내주세요');
   };
+  $('#amapkey-save', el).onclick = () => (put('settings', { ...settings(), id: 'main', amapKey: $('#amapkey', el).value.trim() }), toast('저장했어요'));
   $('#title-save', el).onclick = () => put('settings', { ...settings(), id: 'main', title: $('#title', el).value });
   $('#export', el).onclick = () => download(`shanghai-trip-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(D, null, 2), 'application/json');
   $('#import', el).onchange = async (e) => {
@@ -1522,6 +1790,7 @@ function askWho() {
     ui.me = b.dataset.iam;
     localStorage.setItem('sh2027:me', ui.me);
     closeModal();
+    heartbeat();
     render();
   }));
 }
@@ -1553,8 +1822,11 @@ async function main() {
     if ((lastW < 760) !== (window.innerWidth < 760)) render();
     lastW = window.innerWidth;
   });
-  // 여행 중이면 1분마다 현재시각 선 갱신
-  setInterval(() => ui.tab === 'plan' && !$('.modal-bg') && render(), 60000);
+  // 1분마다: 현재시각 선·접속 시간 갱신, 2분마다 내 접속 기록
+  setInterval(() => (ui.tab === 'plan' && !$('.modal-bg') ? render() : renderHeader()), 60000);
+  heartbeat();
+  setInterval(heartbeat, 2 * 60000);
+  document.addEventListener('visibilitychange', heartbeat);
   // 첫 화면: 여행 기간이면 오늘 날짜로
   const today = shanghaiNow().date;
   const ti = TRIP.days.indexOf(today);

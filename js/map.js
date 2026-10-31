@@ -90,12 +90,71 @@ export function setLayer(map, key) {
   map._layerKey = key;
 }
 
-// ---------- 장소 검색 (Nominatim, WGS → GCJ 변환) ----------
-export async function searchPlace(q) {
-  const p = new URLSearchParams({ format: 'json', q, limit: '6', 'accept-language': 'ko,zh,en', viewbox: '119.9,32.0,122.2,30.0', bounded: '1' });
-  const r = await fetch(`https://nominatim.openstreetmap.org/search?${p}`);
-  const j = await r.json();
-  return j.map((x) => ({ name: x.display_name, loc: wgs2gcj([Number(x.lat), Number(x.lon)]) }));
+// ---------- 장소 검색 ----------
+// 결과: { name, cn, en, addr, loc(GCJ), src }
+// 고덕 Web API 키가 있으면 고덕 POI 검색(가장 정확, 중문),
+// 없으면 OpenStreetMap 계열(Nominatim + Photon)을 같이 돌려서 합친다 (중문·영문 모두 검색됨).
+const BOX = { w: 119.9, s: 30.0, e: 122.2, n: 32.0 }; // 상하이 + 쑤저우·항저우 근교
+
+async function amapSearch(q, key) {
+  const p = new URLSearchParams({ key, keywords: q, city: '上海', citylimit: 'false', offset: '10', extensions: 'base' });
+  const j = await (await fetch(`https://restapi.amap.com/v3/place/text?${p}`)).json();
+  if (j.status !== '1') throw new Error(j.info || 'amap');
+  return (j.pois || []).map((x) => {
+    const [lng, lat] = String(x.location).split(',').map(Number);
+    return { name: x.name, cn: x.name, en: '', addr: [x.cityname, x.adname, typeof x.address === 'string' ? x.address : ''].filter(Boolean).join(' '), loc: [lat, lng], src: '고덕' };
+  });
+}
+
+async function nominatimSearch(q) {
+  const p = new URLSearchParams({
+    format: 'jsonv2', q, limit: '8', namedetails: '1', addressdetails: '0', 'accept-language': 'zh-CN,zh,en',
+    viewbox: `${BOX.w},${BOX.n},${BOX.e},${BOX.s}`, bounded: '1',
+  });
+  const j = await (await fetch(`https://nominatim.openstreetmap.org/search?${p}`)).json();
+  return j.map((x) => {
+    const nd = x.namedetails || {};
+    const cn = nd['name:zh-Hans'] || nd['name:zh'] || nd.name || '';
+    const en = nd['name:en'] || '';
+    return { name: cn || en || x.display_name.split(',')[0], cn, en, addr: x.display_name.split(',').slice(1, 4).join(','), loc: wgs2gcj([Number(x.lat), Number(x.lon)]), src: 'OSM' };
+  });
+}
+
+async function photonSearch(q) {
+  // 부분 일치·오타에 강함
+  const p = new URLSearchParams({ q, limit: '8', bbox: `${BOX.w},${BOX.s},${BOX.e},${BOX.n}`, lat: '31.23', lon: '121.47' });
+  const j = await (await fetch(`https://photon.komoot.io/api/?${p}`)).json();
+  return (j.features || []).map((f) => {
+    const pr = f.properties || {};
+    const [lng, lat] = f.geometry.coordinates;
+    const name = pr.name || pr.street || '';
+    const cjk = /[一-鿿]/.test(name);
+    return { name, cn: cjk ? name : '', en: cjk ? '' : name, addr: [pr.street, pr.district, pr.city].filter(Boolean).join(' '), loc: wgs2gcj([lat, lng]), src: 'OSM' };
+  }).filter((x) => x.name);
+}
+
+export async function searchPlace(q, { amapKey } = {}) {
+  if (amapKey) {
+    try {
+      const r = await amapSearch(q, amapKey);
+      if (r.length) return r;
+    } catch (e) {
+      console.warn('고덕 검색 실패, OSM으로', e);
+    }
+  }
+  const settled = await Promise.allSettled([nominatimSearch(q), photonSearch(q)]);
+  const all = settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []));
+  if (!all.length && settled.every((s) => s.status === 'rejected')) throw new Error('search failed');
+  // 100m 이내 + 같은 이름은 하나로
+  const out = [];
+  for (const r of all) {
+    const dup = out.find((o) => distKm(o.loc, r.loc) < 0.1 || (o.name === r.name && distKm(o.loc, r.loc) < 1));
+    if (dup) {
+      dup.cn ||= r.cn;
+      dup.en ||= r.en;
+    } else out.push(r);
+  }
+  return out.slice(0, 10);
 }
 
 export function pinIcon({ color = '#ef4444', text = '', size = 28, cls = '' } = {}) {

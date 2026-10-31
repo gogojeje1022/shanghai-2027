@@ -1,6 +1,6 @@
 // 저장소: Firebase 설정이 있으면 Firestore 실시간 공유, 없으면 이 브라우저(localStorage)에만 저장
 
-export const COLLS = ['items', 'hotels', 'ideas', 'checklist', 'expenses', 'settings'];
+export const COLLS = ['items', 'hotels', 'ideas', 'checklist', 'expenses', 'settings', 'snapshots', 'presence'];
 const FB_VER = '10.12.2';
 
 function emptyData() {
@@ -57,6 +57,17 @@ function localStore(key, onStatus) {
       const next = { ...data[coll] };
       delete next[id];
       data[coll] = next;
+      save();
+      emit();
+    },
+    // 여러 개를 한 번에: ops = [{ coll, id, obj }] (obj 가 없으면 삭제)
+    batch(ops) {
+      for (const { coll, id, obj } of ops) {
+        const next = { ...data[coll] };
+        if (obj) next[id] = obj;
+        else delete next[id];
+        data[coll] = next;
+      }
       save();
       emit();
     },
@@ -150,6 +161,25 @@ async function firestoreStore(config, tripKey, onStatus) {
       fs.deleteDoc(fs.doc(db, 'trips', tripKey, coll, id)).catch((e) =>
         onStatus?.('error', `삭제 실패: ${e.code || e.message}`),
       );
+    },
+    batch(ops) {
+      for (const { coll, id, obj } of ops) {
+        const next = { ...data[coll] };
+        if (obj) next[id] = obj;
+        else delete next[id];
+        data[coll] = next;
+      }
+      emit();
+      // Firestore 배치는 500개 제한 → 나눠서
+      for (let i = 0; i < ops.length; i += 450) {
+        const b = fs.writeBatch(db);
+        for (const { coll, id, obj } of ops.slice(i, i + 450)) {
+          const ref = fs.doc(db, 'trips', tripKey, coll, id);
+          if (obj) b.set(ref, clean(obj));
+          else b.delete(ref);
+        }
+        b.commit().catch((e) => onStatus?.('error', `저장 실패: ${e.code || e.message}`));
+      }
     },
     subscribe(fn) {
       subs.add(fn);
