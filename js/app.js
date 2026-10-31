@@ -162,10 +162,15 @@ function renderHeader() {
     </div>`;
   $$('[data-me]').forEach((b) =>
     (b.onclick = () => {
-      ui.me = b.dataset.me;
+      const next = b.dataset.me;
+      if (next === ui.me) return;
+      if (ui.me && !confirm(`사용자를 ${PEOPLE[next].name}(으)로 바꾸시겠습니까?
+(지금: ${PEOPLE[ui.me]?.name || '?'})`)) return;
+      ui.me = next;
       localStorage.setItem('sh2027:me', ui.me);
       heartbeat();
       render();
+      toast(`${PEOPLE[next].name}(으)로 바꿨어요`);
     }),
   );
 }
