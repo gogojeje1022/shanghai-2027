@@ -1822,14 +1822,18 @@ function initChat() {
     if (y) openYT(y.dataset.yt);
   });
   document.addEventListener('visibilitychange', () => chat.open && !document.hidden && markChatRead());
+  // 기본은 펼침 (PC). 휴대폰은 전체화면이라 접힌 채로 시작. 직접 열고 닫으면 그 상태를 기억
+  const saved = localStorage.getItem('sh2027:chatOpen');
+  if (saved ? saved === '1' : window.innerWidth >= 760) toggleChat(true, false);
 }
 
-function toggleChat(open) {
+function toggleChat(open, remember = true) {
   chat.open = open;
+  if (remember) localStorage.setItem('sh2027:chatOpen', open ? '1' : '0');
   $('#chat').hidden = !open;
   document.body.classList.toggle('chat-open', open);
   renderChat(true);
-  if (open) setTimeout(() => $('#chat-in').focus(), 30);
+  if (open && remember) setTimeout(() => $('#chat-in').focus(), 30);
 }
 
 function markChatRead() {
